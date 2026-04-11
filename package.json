@@ -1,0 +1,31 @@
+{
+  "name": "dep-impact",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "dep-impact": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/cli/index.ts",
+    "test": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chalk": "5",
+    "commander": "12",
+    "dotenv": "^17.3.1",
+    "glob": "10",
+    "node-fetch": "3",
+    "semver": "7",
+    "tar": "^7.5.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/semver": "^7.7.1",
+    "@types/tar": "^6.1.13",
+    "ts-node": "^10.9.2",
+    "typescript": "5",
+    "vitest": "^3.2.4"
+  }
+}
