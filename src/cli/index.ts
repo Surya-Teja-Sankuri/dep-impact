@@ -89,6 +89,7 @@ program
           resolved.currentVersion,
           resolved.targetVersion,
           fetched.content,
+          { silent: effectiveJson },
         );
 
         const scored = scoreRisk(

@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm --prefix \"d:/personal/projects/Dep-Impact\" run lint)",
+      "Bash(npm --prefix \"d:/personal/projects/Dep-Impact\" run build)",
+      "Bash(node \"d:/personal/projects/Dep-Impact/dist/cli/index.js\" upgrade axios --verbose)",
+      "Bash(node \"../dist/cli/index.js\" upgrade axios@1.0.0 --json)",
+      "Bash(npm install:*)",
+      "Bash(node \"d:/personal/projects/Dep-Impact/dist/cli/index.js\" upgrade axios@1.0.0 --json)",
+      "Bash(node test-scanner.mjs)",
+      "Bash(ls /tmp/dep-impact-tests/*.ts)",
+      "Bash(node -e \"const fs = require\\('fs'\\); console.log\\(fs.readdirSync\\('/tmp/dep-impact-tests'\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(cmd.exe /c \"echo %TEMP%\")",
+      "Bash(node -e \"console.log\\(require\\('os'\\).tmpdir\\(\\)\\)\")",
+      "Bash(cygpath -w /tmp/dep-impact-tests)",
+      "Bash(wslpath -w /tmp/dep-impact-tests)",
+      "Bash(node -e \"const fs = require\\('fs'\\); console.log\\(fs.readdirSync\\('C:/Users/ssankuri/AppData/Local/Temp/dep-impact-tests'\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node test-scorer.mjs)",
+      "Read(//c/Users/ssankuri/AppData/Local/Temp/dep-impact-tests/**)",
+      "Bash(node \"d:/personal/projects/Dep-Impact/dist/cli/index.js\" upgrade axios@1.0.0)",
+      "Bash(python3 -c \"import sys,json; d=json.loads\\(''.join\\(l for l in sys.stdin if not l.startswith\\('Analyzing'\\) and not l.startswith\\('Using'\\)\\)\\); print\\('overall:', d['overall']\\); print\\('files:', len\\(d['files']\\)\\); print\\('strategy:', d['strategy']\\)\")",
+      "Bash(node \"d:/personal/projects/Dep-Impact/dist/cli/index.js\" upgrade axios@1.0.0 --verbose)"
+    ]
+  }
+}

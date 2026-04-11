@@ -39,6 +39,7 @@ export async function parseChangelog(
   currentVersion: string,
   targetVersion: string,
   changelogText: string,
+  options: { silent?: boolean } = {},
 ): Promise<ParsedChangelog> {
   const versionRange = `${currentVersion} -> ${targetVersion}`;
   let currentTypes:
@@ -59,7 +60,7 @@ export async function parseChangelog(
         packageName,
       );
 
-      console.log("Using type definitions for accurate diffing");
+      if (!options.silent) console.log("Using type definitions for accurate diffing");
       return {
         breakingChanges: diffResult.breakingChanges,
         versionRange,
@@ -68,9 +69,9 @@ export async function parseChangelog(
     }
   } catch (error: unknown) {
     if (error instanceof Error) {
-      console.log(`Type definition diff failed: ${error.message}`);
+      if (!options.silent) console.log(`Type definition diff failed: ${error.message}`);
     } else {
-      console.log("Type definition diff failed");
+      if (!options.silent) console.log("Type definition diff failed");
     }
   } finally {
     if (currentTypes) {
@@ -84,11 +85,11 @@ export async function parseChangelog(
 
   const heuristicResult = parseWithHeuristics(changelogText, versionRange);
   if (heuristicResult) {
-    console.log("Falling back to changelog text heuristics");
+    if (!options.silent) console.log("Falling back to changelog text heuristics");
     return heuristicResult;
   }
 
-  console.log("No type definitions or changelog available");
+  if (!options.silent) console.log("No type definitions or changelog available");
   return {
     breakingChanges: [],
     versionRange,

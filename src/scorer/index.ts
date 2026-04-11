@@ -21,6 +21,11 @@ export type ScoreResult = {
   strategy: "type-diff" | "regex-heuristics" | "none";
 };
 
+type BreakingChangeMatch = {
+  breakingChange: BreakingChange;
+  capSeverity: boolean; // true when matched via Strategy 4 (description token only)
+};
+
 /**
  * Scores upgrade risk by cross-referencing per-file package usage against the
  * parsed breaking changes for the target version range.
@@ -86,8 +91,13 @@ function scoreFile(
       breakingChangeLookup,
     );
 
-    for (const breakingChange of matchingChanges) {
-      risk = elevateRisk(risk, severityToRisk(breakingChange.severity));
+    for (const { breakingChange, capSeverity } of matchingChanges) {
+      let effectiveRisk = severityToRisk(breakingChange.severity);
+      // Strategy 4 matches are weak — cap HIGH → MEDIUM (breaking → changed)
+      if (capSeverity && effectiveRisk === "HIGH") {
+        effectiveRisk = "MEDIUM";
+      }
+      risk = elevateRisk(risk, effectiveRisk);
 
       const trimmedReason = truncateReason(breakingChange.description.trim());
       if (!seenReasons.has(trimmedReason)) {
@@ -114,18 +124,11 @@ function findMatchingBreakingChanges(
   method: string,
   packageName: string,
   breakingChanges: BreakingChange[],
-  breakingChangeLookup: Map<string, BreakingChange>,
-): BreakingChange[] {
-  const matches: BreakingChange[] = [];
+  _breakingChangeLookup: Map<string, BreakingChange>,
+): BreakingChangeMatch[] {
+  const matches: BreakingChangeMatch[] = [];
   const seenIdentifiers = new Set<string>();
   const normalizedMethod = normalizeIdentifier(method);
-  const methodCandidates = buildMethodCandidates(normalizedMethod, packageName);
-  const exactMatch = breakingChangeLookup.get(normalizedMethod);
-
-  if (exactMatch) {
-    matches.push(exactMatch);
-    seenIdentifiers.add(normalizeIdentifier(exactMatch.identifier));
-  }
 
   for (const breakingChange of breakingChanges) {
     const normalizedIdentifier = normalizeIdentifier(breakingChange.identifier);
@@ -133,18 +136,80 @@ function findMatchingBreakingChanges(
       continue;
     }
 
-    const comparisonTargets = buildComparisonTargets(breakingChange, packageName);
-    const isMatch = methodCandidates.some((candidate) =>
-      comparisonTargets.some((target) => isCandidateMatch(candidate, target)),
+    const result = matchMethodToBreakingChange(
+      normalizedMethod,
+      packageName,
+      normalizedIdentifier,
+      breakingChange.description,
     );
 
-    if (isMatch) {
-      matches.push(breakingChange);
+    if (result.matched) {
+      matches.push({ breakingChange, capSeverity: result.capSeverity });
       seenIdentifiers.add(normalizedIdentifier);
     }
   }
 
   return matches;
+}
+
+/**
+ * Tests whether a usage method matches a breaking change using five strategies
+ * in priority order, stopping at the first match.
+ *
+ * Strategy 1 — Exact:   method === identifier (with or without package prefix)
+ * Strategy 2 — Parent:  identifier is an ancestor of method (usage is more specific)
+ * Strategy 3 — Child:   method is an ancestor of identifier (breaking change is more specific)
+ * Strategy 4 — Description: stripped method name appears as a token in the description
+ *              (weak match — caller should cap severity at MEDIUM)
+ * Strategy 5 — No match
+ */
+function matchMethodToBreakingChange(
+  normalizedMethod: string,
+  packageName: string,
+  normalizedIdentifier: string,
+  description: string,
+): { matched: boolean; capSeverity: boolean } {
+  const strippedMethod = stripPackagePrefix(normalizedMethod, packageName);
+  const strippedIdentifier = stripPackagePrefix(normalizedIdentifier, packageName);
+
+  // Strategy 1: Exact match (handles identifiers with or without package prefix)
+  if (
+    normalizedMethod === normalizedIdentifier ||
+    (strippedMethod && strippedIdentifier && strippedMethod === strippedIdentifier)
+  ) {
+    return { matched: true, capSeverity: false };
+  }
+
+  // Strategy 2: Parent match — breaking change is an ancestor of the usage
+  // e.g. usage "axios.defaults.headers", BC "axios.defaults" → match
+  if (
+    normalizedMethod.startsWith(`${normalizedIdentifier}.`) ||
+    (strippedIdentifier && strippedMethod.startsWith(`${strippedIdentifier}.`))
+  ) {
+    return { matched: true, capSeverity: false };
+  }
+
+  // Strategy 3: Child match — usage is an ancestor of the breaking change
+  // e.g. usage "axios.create", BC "axios.create.config" → match
+  if (
+    normalizedIdentifier.startsWith(`${normalizedMethod}.`) ||
+    (strippedMethod && strippedIdentifier.startsWith(`${strippedMethod}.`))
+  ) {
+    return { matched: true, capSeverity: false };
+  }
+
+  // Strategy 4: Description token match (weak — cap severity at MEDIUM)
+  // Strip package prefix then check if the method name appears as a token
+  // in the breaking change description.
+  if (strippedMethod) {
+    const descriptionTokens = extractMethodLikeTokens(description).map(normalizeIdentifier);
+    if (descriptionTokens.includes(strippedMethod)) {
+      return { matched: true, capSeverity: true };
+    }
+  }
+
+  // Strategy 5: No match
+  return { matched: false, capSeverity: false };
 }
 
 function normalizeIdentifier(identifier: string): string {
@@ -162,59 +227,9 @@ function stripPackagePrefix(identifier: string, packageName: string): string {
   return identifier;
 }
 
-function buildMethodCandidates(method: string, packageName: string): string[] {
-  const candidates = new Set<string>();
-  const strippedMethod = stripPackagePrefix(method, packageName);
-
-  addNonEmpty(candidates, method);
-  addNonEmpty(candidates, strippedMethod);
-
-  const methodSegments = strippedMethod.split(".");
-  addNonEmpty(candidates, methodSegments[methodSegments.length - 1] ?? "");
-
-  for (let index = 0; index < methodSegments.length; index += 1) {
-    addNonEmpty(candidates, methodSegments.slice(index).join("."));
-  }
-
-  return Array.from(candidates);
-}
-
-function buildComparisonTargets(
-  breakingChange: BreakingChange,
-  packageName: string,
-): string[] {
-  const targets = new Set<string>();
-  const normalizedIdentifier = normalizeIdentifier(breakingChange.identifier);
-  const strippedIdentifier = stripPackagePrefix(normalizedIdentifier, packageName);
-
-  addNonEmpty(targets, normalizedIdentifier);
-  addNonEmpty(targets, strippedIdentifier);
-
-  for (const token of extractMethodLikeTokens(breakingChange.description)) {
-    addNonEmpty(targets, normalizeIdentifier(token));
-  }
-
-  return Array.from(targets);
-}
-
 function extractMethodLikeTokens(description: string): string[] {
   const matches = description.match(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/g);
   return matches ?? [];
-}
-
-function isCandidateMatch(candidate: string, target: string): boolean {
-  return (
-    candidate === target ||
-    target.includes(candidate) ||
-    candidate.includes(target)
-  );
-}
-
-function addNonEmpty(target: Set<string>, value: string): void {
-  const trimmedValue = value.trim();
-  if (trimmedValue.length > 0) {
-    target.add(trimmedValue);
-  }
 }
 
 function severityToRisk(

@@ -38,7 +38,14 @@ export function printReport(
   verbose = false,
 ): void {
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    const jsonResult = {
+      ...result,
+      files: result.files.map((f) => ({
+        ...f,
+        file: path.relative(process.cwd(), f.file),
+      })),
+    };
+    console.log(JSON.stringify(jsonResult, null, 2));
     return;
   }
 
