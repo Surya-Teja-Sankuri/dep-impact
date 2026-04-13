@@ -1,0 +1,10 @@
+src/
+tests/
+.claude/
+.env
+.env.example
+.depimpact.json
+CLAUDE.md
+tsconfig.json
+**/*.test.ts
+**/test-manual.ts
