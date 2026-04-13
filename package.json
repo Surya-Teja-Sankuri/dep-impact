@@ -1,7 +1,24 @@
 {
   "name": "dep-impact",
   "version": "0.1.1",
+  "description": "Analyze the impact of dependency updates in your Node.js project",
+  "license": "MIT",
   "type": "module",
+  "author": "Surya Teja Sankuri",
+  "keywords": [
+    "dependencies",
+    "npm",
+    "impact",
+    "analysis",
+    "audit"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Surya-Teja-Sankuri/dep-impact.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "bin": {
     "dep-impact": "./dist/cli/index.js"
   },
@@ -9,14 +26,13 @@
     "build": "tsc",
     "dev": "ts-node src/cli/index.ts",
     "test": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "chalk": "5",
     "commander": "12",
-    "dotenv": "^17.3.1",
     "glob": "10",
-    "node-fetch": "3",
     "semver": "7",
     "tar": "^7.5.13"
   },
