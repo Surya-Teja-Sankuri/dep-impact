@@ -14,13 +14,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Surya-Teja-Sankuri/dep-impact.git"
+    "url": "git+https://github.com/Surya-Teja-Sankuri/dep-impact.git"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "bin": {
-    "dep-impact": "./dist/cli/index.js"
+    "dep-impact": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc",
