@@ -88,15 +88,6 @@ describe("scanProject", () => {
     expect(getUsage!.line).toBe(2);
   });
 
-  // KNOWN SOURCE BUG (not fixed here, per test-writing instructions): unwrapDefaultAccess()
-  // only strips a direct `.default` PropertyAccessExpression. `require("pkg").default` needs
-  // no parentheses so it unwraps fine, but `await import("pkg")` binds tighter than `.default`
-  // (operator precedence), so writing this pattern requires parens:
-  // `(await import("pkg")).default`. Those parens produce a ParenthesizedExpression node that
-  // unwrapDefaultAccess() never sees through, so getDynamicImportPackageName() returns null and
-  // the usage is silently dropped. This test asserts the correct/intended behavior and is
-  // expected to fail until the source strips ParenthesizedExpression nodes (e.g. via
-  // ts.skipParentheses) before checking for `.default`.
   it("detects usage through (await import()).default ESM interop unwrap", async () => {
     writeFile(
       "src/index.ts",
@@ -169,6 +160,54 @@ describe("scanProject", () => {
     expect(result.totalFilesScanned).toBe(2);
   });
 
+  it("detects method calls on a constructed instance of a named-import class (bug fix)", async () => {
+    // Before the fix, `new ImportedClass()` assigned to a local variable was
+    // never tracked, so `program.name(...)` went completely undetected —
+    // an extremely common pattern for any class-based library API.
+    writeFile(
+      "src/index.ts",
+      [
+        'import { Command } from "somepkg";',
+        "",
+        "const program = new Command();",
+        'program.name("my-cli");',
+        "program.parse();",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await scanProject(PACKAGE_NAME, projectRoot);
+
+    const nameUsage = result.usages.find((u) => u.method === "Command.name");
+    expect(nameUsage).toBeDefined();
+    expect(nameUsage!.line).toBe(4);
+
+    const parseUsage = result.usages.find((u) => u.method === "Command.parse");
+    expect(parseUsage).toBeDefined();
+    expect(parseUsage!.line).toBe(5);
+  });
+
+  it("does not track a constructed instance of a default/namespace import as a class (unsupported, avoids guessing)", async () => {
+    // Only named imports carry a known declared class name that the
+    // type-differ can also resolve; a default-import alias's real exported
+    // name isn't knowable from the import site alone, so it's intentionally
+    // left untracked rather than guessed.
+    writeFile(
+      "src/index.ts",
+      [
+        'import Somepkg from "somepkg";',
+        "",
+        "const instance = new Somepkg();",
+        "instance.doThing();",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await scanProject(PACKAGE_NAME, projectRoot);
+
+    expect(result.usages.some((u) => u.method.includes("doThing"))).toBe(false);
+  });
+
   it("skips files under node_modules, dist, and build even if they match the glob", async () => {
     writeFile(
       "node_modules/somepkg/index.js",
@@ -190,5 +229,17 @@ describe("scanProject", () => {
     expect(result.usages.every((u) => normalize(u.file).includes("/src/real.ts"))).toBe(
       true,
     );
+  });
+
+  it("does not exclude everything when scanning dep-impact's own repository directly (bug fix)", async () => {
+    // The dep-impact-own-files exclusion (to avoid double-counting dep-impact's
+    // own bundled copy when it's installed as a dependency elsewhere) used to
+    // key off "is this file under the same root as the currently-running
+    // dep-impact code" — which is trivially true for every file when you run
+    // dep-impact directly against its own checkout, silently zeroing out the
+    // whole scan. Vitest runs from the repo root, so process.cwd() here IS
+    // dep-impact's own TOOL_ROOT — this is the exact scenario that broke.
+    const result = await scanProject("some-package-that-does-not-exist", process.cwd());
+    expect(result.totalFilesScanned).toBeGreaterThan(0);
   });
 });

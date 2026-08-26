@@ -1,6 +1,6 @@
 {
   "name": "dep-impact",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Analyze the impact of dependency updates in your Node.js project",
   "license": "MIT",
   "type": "module",

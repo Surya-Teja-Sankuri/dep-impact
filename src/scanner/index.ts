@@ -19,6 +19,10 @@ export type UsageMap = {
 type ImportBindings = {
   aliases: Set<string>;
   namedImports: Map<string, string>;
+  // Local variable → imported class name, for `const x = new ImportedClass()`.
+  // Method calls on x are attributed to "ClassName.method" (unprefixed),
+  // matching how the type-differ keys class methods in its exports map.
+  instances: Map<string, string>;
 };
 
 type ReExportedBindings = {
@@ -63,7 +67,14 @@ export async function scanProject(
   const usages: Usage[] = [];
   const seenUsages = new Set<string>();
 
-  const relevantFiles = files.filter((filePath) => !isDepImpactFile(filePath));
+  // The dep-impact-own-files exclusion below only makes sense when
+  // dep-impact is installed *inside* the project being scanned (e.g. as a
+  // devDependency, possibly npm-linked) — it must not exclude everything
+  // when someone runs dep-impact directly against its own repository.
+  const scanningOwnRepo = path.resolve(projectRoot) === TOOL_ROOT;
+  const relevantFiles = scanningOwnRepo
+    ? files
+    : files.filter((filePath) => !isDepImpactFile(filePath));
 
   const reExportMap = await buildReExportMap(packageName, relevantFiles);
 
@@ -120,6 +131,18 @@ async function scanFile(
             seenUsages,
             {
               method: `${packageName}.${chain.slice(1).join(".")}`,
+              file: filePath,
+              line: getLineNumber(sourceFile, node),
+            },
+          );
+        } else if (bindings.instances.has(chain[0])) {
+          // Constructed instance of an imported class: program.name() → Command.name
+          const className = bindings.instances.get(chain[0])!;
+          addUsage(
+            usages,
+            seenUsages,
+            {
+              method: `${className}.${chain.slice(1).join(".")}`,
               file: filePath,
               line: getLineNumber(sourceFile, node),
             },
@@ -184,6 +207,7 @@ function findImportBindings(
   const bindings: ImportBindings = {
     aliases: new Set<string>(),
     namedImports: new Map<string, string>(),
+    instances: new Map<string, string>(),
   };
 
   visitNodes(sourceFile, (node) => {
@@ -208,10 +232,42 @@ function findImportBindings(
     if (ts.isVariableStatement(node)) {
       collectRequireBindings(node, packageName, bindings);
       collectDynamicImportBindings(node, packageName, bindings);
+      collectConstructorInstanceBindings(node, bindings);
     }
   });
 
   return bindings;
+}
+
+/**
+ * Tracks `const x = new ImportedClass();` so later calls like `x.method()`
+ * can be attributed back to the class. Only named imports are handled
+ * (the class's real declared name is known); a default/namespace import
+ * used as a constructor is not tracked here, since its local alias name
+ * may not match the class's actual declared name in the package's types.
+ */
+function collectConstructorInstanceBindings(
+  node: ts.VariableStatement,
+  bindings: ImportBindings,
+): void {
+  for (const declaration of node.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) {
+      continue;
+    }
+
+    if (
+      !ts.isNewExpression(declaration.initializer) ||
+      !ts.isIdentifier(declaration.initializer.expression)
+    ) {
+      continue;
+    }
+
+    const constructorName = declaration.initializer.expression.text;
+    const importedClassName = bindings.namedImports.get(constructorName);
+    if (importedClassName) {
+      bindings.instances.set(declaration.name.text, importedClassName);
+    }
+  }
 }
 
 function collectImportDeclarationBindings(
