@@ -49,7 +49,13 @@ export function loadConfig(projectRoot: string): DepImpactConfig {
     return defaults;
   }
 
-  const raw = fs.readFileSync(configPath, "utf8");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, "utf8");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not read .depimpact.json: ${message}`);
+  }
 
   let parsed: RawConfig;
   try {
@@ -60,6 +66,13 @@ export function loadConfig(projectRoot: string): DepImpactConfig {
 
   if (parsed.ignore !== undefined && !Array.isArray(parsed.ignore)) {
     throw new Error(".depimpact.json ignore field must be an array");
+  }
+
+  if (
+    parsed.ignore !== undefined &&
+    !(parsed.ignore as unknown[]).every((entry) => typeof entry === "string")
+  ) {
+    throw new Error(".depimpact.json ignore field must be an array of strings");
   }
 
   // Merge ignore: combine defaults and user values, deduplicate
@@ -73,11 +86,21 @@ export function loadConfig(projectRoot: string): DepImpactConfig {
     typeof parsed.overrides === "object" &&
     parsed.overrides !== null &&
     !Array.isArray(parsed.overrides)
-      ? (parsed.overrides as Record<string, "safe" | "breaking" | "changed">)
+      ? (parsed.overrides as Record<string, unknown>)
       : {};
+
+  const VALID_OVERRIDE_VALUES = new Set(["safe", "breaking", "changed"]);
+  for (const [method, value] of Object.entries(userOverrides)) {
+    if (!VALID_OVERRIDE_VALUES.has(value as string)) {
+      throw new Error(
+        `.depimpact.json overrides["${method}"] must be one of "safe", "breaking", "changed"`,
+      );
+    }
+  }
+
   const mergedOverrides: Record<string, "safe" | "breaking" | "changed"> = {
     ...defaults.overrides,
-    ...userOverrides,
+    ...(userOverrides as Record<string, "safe" | "breaking" | "changed">),
   };
 
   // GitHub token: user config file wins over env var

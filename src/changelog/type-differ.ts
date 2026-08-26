@@ -65,6 +65,16 @@ export async function diffTypeDefinitions(
   };
 }
 
+/**
+ * Extracts the public API surface of a set of declaration files into a map
+ * keyed by exported name. Three export shapes are recognized:
+ *   1. Inline modifier   — `export function foo() {}`, `export interface X {}`
+ *   2. Bare re-export    — `export { foo, bar as baz };` (no module specifier)
+ *   3. Export assignment — `export = foo;` (CommonJS-style .d.ts), including
+ *      the common `declare namespace foo { export interface Result {} }`
+ *      merge pattern, whose exported namespace members are flattened to
+ *      dotted names (e.g. "foo.Result").
+ */
 async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedMember>> {
   const exportsMap = new Map<string, ExportedMember>();
 
@@ -77,14 +87,31 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
       true,
     );
 
+    const bareReExportNames = collectBareReExportNames(sourceFile);
+    const exportAssignmentTarget = findExportAssignmentTarget(sourceFile);
+
     for (const statement of sourceFile.statements) {
-      if (!hasExportModifier(statement)) {
+      if (
+        ts.isModuleDeclaration(statement) &&
+        hasExportModifier(statement) &&
+        ts.isIdentifier(statement.name)
+      ) {
+        flattenNamespaceMembers(statement.name.text, statement, sourceFile, exportsMap);
+        continue;
+      }
+
+      const declaredName = getStatementDeclaredName(statement);
+      const bareExportName =
+        declaredName !== null ? bareReExportNames.get(declaredName) : undefined;
+
+      if (!hasExportModifier(statement) && bareExportName === undefined) {
         continue;
       }
 
       if (ts.isFunctionDeclaration(statement) && statement.name) {
-        exportsMap.set(statement.name.text, {
-          name: statement.name.text,
+        const exportName = bareExportName ?? statement.name.text;
+        exportsMap.set(exportName, {
+          name: exportName,
           kind: "function",
           signature: getCallableSignature(statement, sourceFile),
           parameters: statement.parameters.map(getParameterName),
@@ -93,37 +120,20 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
       }
 
       if (ts.isClassDeclaration(statement) && statement.name) {
-        const className = statement.name.text;
-        exportsMap.set(className, {
-          name: className,
+        const exportName = bareExportName ?? statement.name.text;
+        exportsMap.set(exportName, {
+          name: exportName,
           kind: "class",
           signature: stringifyClassSignature(statement, sourceFile),
         });
-
-        for (const member of statement.members) {
-          if (!ts.isMethodDeclaration(member) || !member.name || !ts.isIdentifier(member.name)) {
-            continue;
-          }
-
-          if (hasPrivateLikeModifier(member)) {
-            continue;
-          }
-
-          const methodName = `${className}.${member.name.text}`;
-          exportsMap.set(methodName, {
-            name: methodName,
-            kind: "method",
-            signature: getCallableSignature(member, sourceFile),
-            parameters: member.parameters.map(getParameterName),
-          });
-        }
-
+        addClassMethods(exportName, statement, sourceFile, exportsMap);
         continue;
       }
 
       if (ts.isInterfaceDeclaration(statement)) {
-        exportsMap.set(statement.name.text, {
-          name: statement.name.text,
+        const exportName = bareExportName ?? statement.name.text;
+        exportsMap.set(exportName, {
+          name: exportName,
           kind: "interface",
           signature: statement.members
             .map((member) => stringifyNode(member, sourceFile))
@@ -133,8 +143,9 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
       }
 
       if (ts.isTypeAliasDeclaration(statement)) {
-        exportsMap.set(statement.name.text, {
-          name: statement.name.text,
+        const exportName = bareExportName ?? statement.name.text;
+        exportsMap.set(exportName, {
+          name: exportName,
           kind: "type",
           signature: stringifyNode(statement.type, sourceFile),
         });
@@ -142,13 +153,21 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
       }
 
       if (ts.isVariableStatement(statement)) {
+        const statementIsExported = hasExportModifier(statement);
+
         for (const declaration of statement.declarationList.declarations) {
           if (!ts.isIdentifier(declaration.name)) {
             continue;
           }
 
-          exportsMap.set(declaration.name.text, {
-            name: declaration.name.text,
+          const declarationBareExportName = bareReExportNames.get(declaration.name.text);
+          if (!statementIsExported && declarationBareExportName === undefined) {
+            continue;
+          }
+
+          const exportName = declarationBareExportName ?? declaration.name.text;
+          exportsMap.set(exportName, {
+            name: exportName,
             kind: "variable",
             signature: declaration.type
               ? stringifyNode(declaration.type, sourceFile)
@@ -157,9 +176,261 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
         }
       }
     }
+
+    if (exportAssignmentTarget) {
+      addExportAssignmentTarget(exportAssignmentTarget, sourceFile, exportsMap);
+    }
   }
 
   return exportsMap;
+}
+
+/**
+ * Finds a bare `export { a, b as c };` declaration (no module specifier) and
+ * returns a map from each member's original declared name to its exported
+ * (possibly renamed) name.
+ */
+function collectBareReExportNames(sourceFile: ts.SourceFile): Map<string, string> {
+  const names = new Map<string, string>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier) {
+      continue;
+    }
+
+    if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+      continue;
+    }
+
+    for (const element of statement.exportClause.elements) {
+      const originalName = element.propertyName?.text ?? element.name.text;
+      names.set(originalName, element.name.text);
+    }
+  }
+
+  return names;
+}
+
+/**
+ * Finds `export = X;` and returns the identifier text of X, or null if the
+ * file has no export assignment or assigns something other than a plain
+ * identifier (e.g. an object literal), which this differ does not resolve.
+ */
+function findExportAssignmentTarget(sourceFile: ts.SourceFile): string | null {
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isExportAssignment(statement) &&
+      statement.isExportEquals &&
+      ts.isIdentifier(statement.expression)
+    ) {
+      return statement.expression.text;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolves `export = targetName` by finding every top-level declaration named
+ * targetName (there may be more than one due to declaration merging, e.g. a
+ * function merged with a same-named namespace) and adding it to the exports
+ * map under its plain name.
+ */
+function addExportAssignmentTarget(
+  targetName: string,
+  sourceFile: ts.SourceFile,
+  exportsMap: Map<string, ExportedMember>,
+): void {
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isModuleDeclaration(statement) &&
+      ts.isIdentifier(statement.name) &&
+      statement.name.text === targetName
+    ) {
+      flattenNamespaceMembers(targetName, statement, sourceFile, exportsMap);
+      continue;
+    }
+
+    if (ts.isFunctionDeclaration(statement) && statement.name?.text === targetName) {
+      exportsMap.set(targetName, {
+        name: targetName,
+        kind: "function",
+        signature: getCallableSignature(statement, sourceFile),
+        parameters: statement.parameters.map(getParameterName),
+      });
+      continue;
+    }
+
+    if (ts.isClassDeclaration(statement) && statement.name?.text === targetName) {
+      exportsMap.set(targetName, {
+        name: targetName,
+        kind: "class",
+        signature: stringifyClassSignature(statement, sourceFile),
+      });
+      addClassMethods(targetName, statement, sourceFile, exportsMap);
+      continue;
+    }
+
+    if (ts.isInterfaceDeclaration(statement) && statement.name.text === targetName) {
+      exportsMap.set(targetName, {
+        name: targetName,
+        kind: "interface",
+        signature: statement.members
+          .map((member) => stringifyNode(member, sourceFile))
+          .join("; "),
+      });
+      continue;
+    }
+
+    if (ts.isTypeAliasDeclaration(statement) && statement.name.text === targetName) {
+      exportsMap.set(targetName, {
+        name: targetName,
+        kind: "type",
+        signature: stringifyNode(statement.type, sourceFile),
+      });
+    }
+  }
+}
+
+/**
+ * Flattens the exported members of an ambient namespace/module block into
+ * the exports map under dotted names (e.g. "foo.Result"). Only members that
+ * carry their own `export` modifier inside the namespace body are visible
+ * outside it, matching TypeScript's ambient namespace semantics.
+ */
+function flattenNamespaceMembers(
+  namespaceName: string,
+  moduleDecl: ts.ModuleDeclaration,
+  sourceFile: ts.SourceFile,
+  exportsMap: Map<string, ExportedMember>,
+): void {
+  const body = moduleDecl.body;
+  if (!body || !ts.isModuleBlock(body)) {
+    return;
+  }
+
+  for (const statement of body.statements) {
+    if (!hasExportModifier(statement)) {
+      continue;
+    }
+
+    if (ts.isFunctionDeclaration(statement) && statement.name) {
+      const qualifiedName = `${namespaceName}.${statement.name.text}`;
+      exportsMap.set(qualifiedName, {
+        name: qualifiedName,
+        kind: "function",
+        signature: getCallableSignature(statement, sourceFile),
+        parameters: statement.parameters.map(getParameterName),
+      });
+      continue;
+    }
+
+    if (ts.isClassDeclaration(statement) && statement.name) {
+      const qualifiedName = `${namespaceName}.${statement.name.text}`;
+      exportsMap.set(qualifiedName, {
+        name: qualifiedName,
+        kind: "class",
+        signature: stringifyClassSignature(statement, sourceFile),
+      });
+      addClassMethods(qualifiedName, statement, sourceFile, exportsMap);
+      continue;
+    }
+
+    if (ts.isInterfaceDeclaration(statement)) {
+      const qualifiedName = `${namespaceName}.${statement.name.text}`;
+      exportsMap.set(qualifiedName, {
+        name: qualifiedName,
+        kind: "interface",
+        signature: statement.members
+          .map((member) => stringifyNode(member, sourceFile))
+          .join("; "),
+      });
+      continue;
+    }
+
+    if (ts.isTypeAliasDeclaration(statement)) {
+      const qualifiedName = `${namespaceName}.${statement.name.text}`;
+      exportsMap.set(qualifiedName, {
+        name: qualifiedName,
+        kind: "type",
+        signature: stringifyNode(statement.type, sourceFile),
+      });
+      continue;
+    }
+
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) {
+          continue;
+        }
+
+        const qualifiedName = `${namespaceName}.${declaration.name.text}`;
+        exportsMap.set(qualifiedName, {
+          name: qualifiedName,
+          kind: "variable",
+          signature: declaration.type
+            ? stringifyNode(declaration.type, sourceFile)
+            : "unknown",
+        });
+      }
+      continue;
+    }
+
+    if (ts.isModuleDeclaration(statement) && ts.isIdentifier(statement.name)) {
+      flattenNamespaceMembers(
+        `${namespaceName}.${statement.name.text}`,
+        statement,
+        sourceFile,
+        exportsMap,
+      );
+    }
+  }
+}
+
+function addClassMethods(
+  className: string,
+  classNode: ts.ClassDeclaration,
+  sourceFile: ts.SourceFile,
+  exportsMap: Map<string, ExportedMember>,
+): void {
+  for (const member of classNode.members) {
+    if (!ts.isMethodDeclaration(member) || !member.name || !ts.isIdentifier(member.name)) {
+      continue;
+    }
+
+    if (hasPrivateLikeModifier(member)) {
+      continue;
+    }
+
+    const methodName = `${className}.${member.name.text}`;
+    exportsMap.set(methodName, {
+      name: methodName,
+      kind: "method",
+      signature: getCallableSignature(member, sourceFile),
+      parameters: member.parameters.map(getParameterName),
+    });
+  }
+}
+
+/**
+ * Returns the name a top-level statement declares, if any — used to check
+ * whether a statement (regardless of its own export modifier) is the target
+ * of a bare `export { name };` re-export.
+ */
+function getStatementDeclaredName(statement: ts.Statement): string | null {
+  if (ts.isFunctionDeclaration(statement)) {
+    return statement.name?.text ?? null;
+  }
+
+  if (ts.isClassDeclaration(statement)) {
+    return statement.name?.text ?? null;
+  }
+
+  if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
+    return statement.name.text;
+  }
+
+  return null;
 }
 
 function stringifyNode(node: ts.Node, sourceFile: ts.SourceFile): string {
@@ -234,7 +505,9 @@ function getSignatureChangeSeverity(
 }
 
 function countRequiredParameters(parameters: string[]): number {
-  return parameters.filter((parameter) => !parameter.endsWith("?")).length;
+  return parameters.filter(
+    (parameter) => !parameter.endsWith("?") && !parameter.startsWith("..."),
+  ).length;
 }
 
 function qualifyIdentifier(packageName: string, name: string): string {

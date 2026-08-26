@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import fetch, { FetchError } from "node-fetch";
 import { glob } from "glob";
 
 export type ExtractedTypes = {
@@ -82,14 +81,10 @@ export async function cleanupTypes(extracted: ExtractedTypes): Promise<void> {
 async function getTarballUrl(packageName: string, version: string): Promise<string> {
   const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(packageName)}/${encodeURIComponent(version)}`;
 
-  let response: Awaited<ReturnType<typeof fetch>>;
+  let response: Response;
   try {
     response = await fetch(registryUrl);
-  } catch (error: unknown) {
-    if (error instanceof FetchError || error instanceof Error) {
-      throw new Error(`Could not reach npm registry for ${packageName}@${version}`);
-    }
-
+  } catch {
     throw new Error(`Could not reach npm registry for ${packageName}@${version}`);
   }
 
@@ -112,14 +107,10 @@ async function getTarballUrl(packageName: string, version: string): Promise<stri
 }
 
 async function downloadTarball(tarballUrl: string): Promise<Buffer> {
-  let response: Awaited<ReturnType<typeof fetch>>;
+  let response: Response;
   try {
     response = await fetch(tarballUrl);
-  } catch (error: unknown) {
-    if (error instanceof FetchError || error instanceof Error) {
-      throw new Error("Could not download package tarball from npm registry");
-    }
-
+  } catch {
     throw new Error("Could not download package tarball from npm registry");
   }
 

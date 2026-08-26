@@ -1,4 +1,3 @@
-import fetch, { FetchError, Headers } from "node-fetch";
 import { gt, lte, valid } from "semver";
 
 export type FetchedChangelog = {
@@ -30,6 +29,7 @@ export async function fetchChangelog(
   repoUrl: string | null,
   currentVersion: string,
   targetVersion: string,
+  githubToken: string | null = null,
 ): Promise<FetchedChangelog> {
   const repoCoordinates = getRepoCoordinates(repoUrl);
 
@@ -39,6 +39,7 @@ export async function fetchChangelog(
       repoUrl,
       currentVersion,
       targetVersion,
+      githubToken,
     );
     if (githubReleases) {
       return githubReleases;
@@ -67,6 +68,7 @@ async function fetchFromGitHubReleases(
   repoUrl: string,
   currentVersion: string,
   targetVersion: string,
+  githubToken: string | null,
 ): Promise<FetchedChangelog | null> {
   const releasesUrl = `https://api.github.com/repos/${repoCoordinates.owner}/${repoCoordinates.repo}/releases`;
   const headers = new Headers({
@@ -74,8 +76,8 @@ async function fetchFromGitHubReleases(
     "X-GitHub-Api-Version": "2022-11-28",
   });
 
-  if (process.env.GITHUB_TOKEN) {
-    headers.set("Authorization", `Bearer ${process.env.GITHUB_TOKEN}`);
+  if (githubToken) {
+    headers.set("Authorization", `Bearer ${githubToken}`);
   }
 
   try {
@@ -257,7 +259,7 @@ function isGitHubRelease(value: unknown): value is GitHubRelease {
 }
 
 function logNetworkDebug(source: string, error: unknown): void {
-  if (error instanceof FetchError || error instanceof Error) {
+  if (error instanceof Error) {
     console.debug(`${source} fetch failed: ${error.message}`);
     return;
   }

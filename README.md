@@ -65,7 +65,7 @@ npm install -g dep-impact
 npx dep-impact upgrade axios
 ```
 
-**Requirements:** Node.js 20+
+**Requirements:** Node.js 18+
 
 ---
 

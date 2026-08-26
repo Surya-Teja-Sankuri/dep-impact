@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import fetch, { FetchError } from "node-fetch";
 
 export type ResolvedPackage = {
   packageName: string;
   currentVersion: string;
   targetVersion: string;
   repoUrl: string | null;
+  alreadyUpToDate: boolean;
 };
 
 type JsonObject = Record<string, unknown>;
@@ -19,6 +19,18 @@ type RegistryResponse = {
   repository?: unknown;
 };
 
+// Deliberately stricter than npm's own (very permissive) validator: it only
+// needs to guarantee that a package name can never contain a path separator
+// beyond the single scope slash, or a ".." segment, before it's joined onto
+// a filesystem path.
+const VALID_PACKAGE_NAME = /^(?:@[a-zA-Z0-9][a-zA-Z0-9._-]*\/)?[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+function assertValidPackageName(packageName: string): void {
+  if (!VALID_PACKAGE_NAME.test(packageName)) {
+    throw new Error(`"${packageName}" is not a valid npm package name`);
+  }
+}
+
 /**
  * Resolves the installed version, desired target version, and repository URL
  * for an npm package used in the current project.
@@ -27,6 +39,8 @@ export async function resolvePackage(
   packageName: string,
   targetVersion?: string,
 ): Promise<ResolvedPackage> {
+  assertValidPackageName(packageName);
+
   const currentVersion = await getCurrentInstalledVersion(packageName);
   const registryPackage = await fetchRegistryPackage(packageName);
   const resolvedTargetVersion = getTargetVersion(
@@ -35,17 +49,12 @@ export async function resolvePackage(
     targetVersion,
   );
 
-  if (resolvedTargetVersion === currentVersion) {
-    throw new Error(
-      `Already on latest version ${resolvedTargetVersion}, nothing to check`,
-    );
-  }
-
   return {
     packageName,
     currentVersion,
     targetVersion: resolvedTargetVersion,
     repoUrl: getRepositoryUrl(registryPackage),
+    alreadyUpToDate: resolvedTargetVersion === currentVersion,
   };
 }
 
@@ -85,24 +94,22 @@ async function getCurrentInstalledVersion(packageName: string): Promise<string> 
 
     return version;
   } catch {
-    throw new Error(`Package ${packageName} is not installed in this project`);
+    throw new Error(
+      `${packageName} is not installed in this project. Run npm install ${packageName} first.`,
+    );
   }
 }
 
 async function fetchRegistryPackage(packageName: string): Promise<RegistryResponse> {
   const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(packageName)}`;
 
-  let response: Awaited<ReturnType<typeof fetch>>;
+  let response: Response;
   try {
     response = await fetch(registryUrl);
-  } catch (error: unknown) {
-    if (error instanceof FetchError || error instanceof Error) {
-      throw new Error(
-        "Could not reach npm registry. Check your internet connection.",
-      );
-    }
-
-    throw new Error("Could not reach npm registry. Check your internet connection.");
+  } catch {
+    throw new Error(
+      "Could not reach npm registry. Check your internet connection.",
+    );
   }
 
   if (response.status === 404) {

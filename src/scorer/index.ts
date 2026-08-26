@@ -26,15 +26,21 @@ type BreakingChangeMatch = {
   capSeverity: boolean; // true when matched via Strategy 4 (description token only)
 };
 
+export type MethodOverrides = Record<string, "safe" | "breaking" | "changed">;
+
 /**
  * Scores upgrade risk by cross-referencing per-file package usage against the
- * parsed breaking changes for the target version range.
+ * parsed breaking changes for the target version range. `overrides` (from
+ * .depimpact.json) lets a user force a specific method's classification,
+ * taking precedence over any detected breaking change for that method.
  */
 export function scoreRisk(
   usageMap: UsageMap,
   parsed: ParsedChangelog,
   currentVersion: string,
   targetVersion: string,
+  overrides: MethodOverrides = {},
+  totalFilesScanned?: number,
 ): ScoreResult {
   const breakingChangeLookup = new Map<string, BreakingChange>();
   for (const breakingChange of parsed.breakingChanges) {
@@ -52,7 +58,14 @@ export function scoreRisk(
   }
 
   const files = Array.from(usagesByFile.entries()).map(([file, methods]) =>
-    scoreFile(file, methods, usageMap.packageName, parsed.breakingChanges, breakingChangeLookup),
+    scoreFile(
+      file,
+      methods,
+      usageMap.packageName,
+      parsed.breakingChanges,
+      breakingChangeLookup,
+      overrides,
+    ),
   );
 
   const overall = getOverallRisk(files);
@@ -65,7 +78,7 @@ export function scoreRisk(
     overall,
     files,
     totalFilesAffected,
-    totalFilesScanned: usagesByFile.size,
+    totalFilesScanned: totalFilesScanned ?? usagesByFile.size,
     strategy: parsed.strategy,
   };
 }
@@ -76,6 +89,7 @@ function scoreFile(
   packageName: string,
   breakingChanges: BreakingChange[],
   breakingChangeLookup: Map<string, BreakingChange>,
+  overrides: MethodOverrides,
 ): FileRisk {
   let risk: RiskLevel = "NONE";
   const reasons: string[] = [];
@@ -84,6 +98,27 @@ function scoreFile(
   const seenAffectedMethods = new Set<string>();
 
   for (const method of methods) {
+    const overrideSeverity = getOverrideSeverity(method, packageName, overrides);
+    if (overrideSeverity) {
+      const effectiveRisk = overrideSeverityToRisk(overrideSeverity);
+      risk = elevateRisk(risk, effectiveRisk);
+
+      if (effectiveRisk !== "NONE") {
+        const trimmedReason = truncateReason(`${method}: manually marked ${overrideSeverity}`);
+        if (!seenReasons.has(trimmedReason)) {
+          seenReasons.add(trimmedReason);
+          reasons.push(trimmedReason);
+        }
+
+        if (!seenAffectedMethods.has(method)) {
+          seenAffectedMethods.add(method);
+          affectedMethods.push(method);
+        }
+      }
+
+      continue;
+    }
+
     const matchingChanges = findMatchingBreakingChanges(
       method,
       packageName,
@@ -118,6 +153,42 @@ function scoreFile(
     reasons,
     affectedMethods,
   };
+}
+
+/**
+ * Looks up a user override for a method, matching with or without the
+ * package name prefix so both "axios.get" and "get" work as override keys.
+ */
+function getOverrideSeverity(
+  method: string,
+  packageName: string,
+  overrides: MethodOverrides,
+): "safe" | "breaking" | "changed" | null {
+  const normalizedMethod = normalizeIdentifier(method);
+  const strippedMethod = stripPackagePrefix(normalizedMethod, packageName);
+
+  for (const [key, value] of Object.entries(overrides)) {
+    const normalizedKey = normalizeIdentifier(key);
+    const strippedKey = stripPackagePrefix(normalizedKey, packageName);
+
+    if (normalizedMethod === normalizedKey || strippedMethod === strippedKey) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function overrideSeverityToRisk(severity: "safe" | "breaking" | "changed"): RiskLevel {
+  if (severity === "breaking") {
+    return "HIGH";
+  }
+
+  if (severity === "changed") {
+    return "MEDIUM";
+  }
+
+  return "NONE";
 }
 
 function findMatchingBreakingChanges(
@@ -227,9 +298,31 @@ function stripPackagePrefix(identifier: string, packageName: string): string {
   return identifier;
 }
 
+/**
+ * Extracts tokens from a breaking-change description that look like real
+ * code references. Dotted chains (e.g. "axios.interceptors") are trusted
+ * anywhere in the text. Bare single-word tokens are only trusted inside
+ * backtick code spans (e.g. "the `post` method was removed") — otherwise
+ * ordinary prose words would collide with real (often short) method names
+ * like "get", "post", or "close".
+ */
 function extractMethodLikeTokens(description: string): string[] {
-  const matches = description.match(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/g);
-  return matches ?? [];
+  const tokens: string[] = [];
+
+  const dottedMatches = description.match(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+/g);
+  if (dottedMatches) {
+    tokens.push(...dottedMatches);
+  }
+
+  const codeSpans = description.match(/`[^`]+`/g) ?? [];
+  for (const span of codeSpans) {
+    const wordMatches = span.slice(1, -1).match(/[A-Za-z_$][\w$]*/g);
+    if (wordMatches) {
+      tokens.push(...wordMatches);
+    }
+  }
+
+  return tokens;
 }
 
 function severityToRisk(

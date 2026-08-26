@@ -13,6 +13,7 @@ export type Usage = {
 export type UsageMap = {
   packageName: string;
   usages: Usage[];
+  totalFilesScanned: number;
 };
 
 type ImportBindings = {
@@ -42,17 +43,21 @@ const TOOL_ROOT = path.resolve(fileURLToPath(new URL("../..", import.meta.url)))
 
 /**
  * Scans a project for imports from a package and records the package methods
- * and properties used at each file and line location.
+ * and properties used at each file and line location. `extraIgnore` (from
+ * .depimpact.json's "ignore" field) is merged with the built-in skip list.
  */
 export async function scanProject(
   packageName: string,
   projectRoot: string,
+  extraIgnore: string[] = [],
 ): Promise<UsageMap> {
+  const ignoredDirectories = [...new Set([...SKIPPED_DIRECTORIES, ...extraIgnore])];
+
   const files = await glob("**/*.{ts,tsx,js,jsx}", {
     cwd: projectRoot,
     absolute: true,
     nodir: true,
-    ignore: SKIPPED_DIRECTORIES.map((directory) => `**/${directory}/**`),
+    ignore: ignoredDirectories.map((directory) => `**/${directory}/**`),
   });
 
   const usages: Usage[] = [];
@@ -76,13 +81,10 @@ export async function scanProject(
     }
   }
 
-  if (usages.length === 0) {
-    console.log(`No usages of ${packageName} found in project`);
-  }
-
   return {
     packageName,
     usages,
+    totalFilesScanned: relevantFiles.length,
   };
 }
 
@@ -318,9 +320,15 @@ function getDynamicImportPackageName(initializer: ts.Expression | undefined): st
 
   let expression: ts.Expression = initializer;
 
+  // Unwrap ESM/CJS interop first, since `.default` is outermost:
+  // const lib = (await import('axios')).default
+  // The parens TypeScript requires here produce a ParenthesizedExpression
+  // wrapping the await, which must also be unwrapped before it's visible.
+  expression = skipParens(unwrapDefaultAccess(expression));
+
   // Unwrap await: const lib = await import('axios')
   if (ts.isAwaitExpression(expression)) {
-    expression = expression.expression;
+    expression = skipParens(expression.expression);
   }
 
   // Check for import() call expression
@@ -418,6 +426,10 @@ async function buildReExportMap(packageName: string, files: string[]): Promise<R
       if (!statement.exportClause) {
         // export * from 'packageName'
         reExported.wildcard = true;
+      } else if (ts.isNamespaceExport(statement.exportClause)) {
+        // export * as http from 'packageName' — http acts as the whole
+        // package namespace, same as a default/namespace import alias.
+        reExported.defaults.add(statement.exportClause.name.text);
       } else if (ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) {
           // element.propertyName is the original name; element.name is the exported name
@@ -462,23 +474,51 @@ function resolveImportToAbsolutePaths(importingFilePath: string, importSpecifier
 }
 
 function getRequiredPackageName(initializer: ts.Expression | undefined): string | null {
-  if (!initializer || !ts.isCallExpression(initializer)) {
+  if (!initializer) {
+    return null;
+  }
+
+  // Unwrap ESM/CJS interop: const pkg = require('axios').default
+  const expression = unwrapDefaultAccess(initializer);
+
+  if (!ts.isCallExpression(expression)) {
     return null;
   }
 
   if (
-    !ts.isIdentifier(initializer.expression) ||
-    initializer.expression.text !== "require"
+    !ts.isIdentifier(expression.expression) ||
+    expression.expression.text !== "require"
   ) {
     return null;
   }
 
-  if (initializer.arguments.length !== 1) {
+  if (expression.arguments.length !== 1) {
     return null;
   }
 
-  const [firstArgument] = initializer.arguments;
+  const [firstArgument] = expression.arguments;
   return ts.isStringLiteral(firstArgument) ? firstArgument.text : null;
+}
+
+/**
+ * Unwraps the common ESM/CJS interop pattern `expr.default` (e.g.
+ * `require('pkg').default` or `(await import('pkg')).default`), returning
+ * the inner expression so the call underneath can still be recognized.
+ */
+function unwrapDefaultAccess(expression: ts.Expression): ts.Expression {
+  if (ts.isPropertyAccessExpression(expression) && expression.name.text === "default") {
+    return expression.expression;
+  }
+
+  return expression;
+}
+
+function skipParens(expression: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(expression)) {
+    expression = expression.expression;
+  }
+
+  return expression;
 }
 
 function getBindingElementImportedName(element: ts.BindingElement): string {

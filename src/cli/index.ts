@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { Command } from "commander";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import chalk from "chalk";
 import { resolvePackage } from "../resolver/index.js";
 import { scanProject } from "../scanner/index.js";
@@ -10,6 +11,9 @@ import { parseChangelog } from "../changelog/parser.js";
 import { scoreRisk } from "../scorer/index.js";
 import { printReport } from "../reporter/index.js";
 import { loadConfig } from "../config/index.js";
+
+const require = createRequire(import.meta.url);
+const { version: packageVersion } = require("../../package.json") as { version: string };
 
 /**
  * Parses a package argument that may include a version tag.
@@ -32,11 +36,49 @@ export function parsePackageArg(
   return { name: input, version: undefined };
 }
 
+/**
+ * Reports a terminal no-op state (already up to date, or the package isn't
+ * used anywhere) in whichever shape the caller asked for, so --json output
+ * stays valid JSON on every code path.
+ */
+function reportNoOp(
+  json: boolean,
+  info: {
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    message: string;
+    totalFilesScanned?: number;
+  },
+): void {
+  if (json) {
+    console.log(
+      JSON.stringify(
+        {
+          packageName: info.packageName,
+          currentVersion: info.currentVersion,
+          targetVersion: info.targetVersion,
+          overall: "NONE",
+          totalFilesAffected: 0,
+          totalFilesScanned: info.totalFilesScanned ?? 0,
+          strategy: "none",
+          files: [],
+          message: info.message,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(info.message);
+  }
+}
+
 const program = new Command();
 
 program
   .name("dep-impact")
-  .version("0.1.0")
+  .version(packageVersion)
   .description("Know what breaks before you upgrade. Not after.");
 
 program
@@ -57,9 +99,13 @@ program
       const verboseMode = options.verbose === true;
       const fixMode = options.fix === true;
 
+      // Known before config loads, so a config-load failure can still report
+      // errors in the shape the caller asked for.
+      let effectiveJson = jsonMode;
+
       try {
         const config = loadConfig(process.cwd());
-        const effectiveJson = jsonMode || config.output.json;
+        effectiveJson = jsonMode || config.output.json;
         const effectiveVerbose = verboseMode || config.output.verbose;
 
         const { name: packageName, version: targetVersion } =
@@ -70,10 +116,27 @@ program
         }
 
         const resolved = await resolvePackage(packageName, targetVersion);
-        const usageMap = await scanProject(packageName, process.cwd());
+
+        if (resolved.alreadyUpToDate) {
+          reportNoOp(effectiveJson, {
+            packageName: resolved.packageName,
+            currentVersion: resolved.currentVersion,
+            targetVersion: resolved.targetVersion,
+            message: `Already on version ${resolved.currentVersion} — nothing to upgrade.`,
+          });
+          process.exit(0);
+        }
+
+        const usageMap = await scanProject(packageName, process.cwd(), config.ignore);
 
         if (usageMap.usages.length === 0) {
-          console.log(`${packageName} is not used in this project`);
+          reportNoOp(effectiveJson, {
+            packageName: resolved.packageName,
+            currentVersion: resolved.currentVersion,
+            targetVersion: resolved.targetVersion,
+            message: `${packageName} is not used in this project.`,
+            totalFilesScanned: usageMap.totalFilesScanned,
+          });
           process.exit(0);
         }
 
@@ -82,6 +145,7 @@ program
           resolved.repoUrl,
           resolved.currentVersion,
           resolved.targetVersion,
+          config.github.token,
         );
 
         const parsed = await parseChangelog(
@@ -97,6 +161,8 @@ program
           parsed,
           resolved.currentVersion,
           resolved.targetVersion,
+          config.overrides,
+          usageMap.totalFilesScanned,
         );
 
         printReport(scored, effectiveJson, effectiveVerbose);
@@ -104,14 +170,23 @@ program
         if (fixMode) {
           const risk = scored.overall;
           if (risk === "NONE" || risk === "LOW") {
-            console.log(
-              `Running npm install ${resolved.packageName}@${resolved.targetVersion}...`,
+            if (!effectiveJson) {
+              console.log(
+                `Running npm install ${resolved.packageName}@${resolved.targetVersion}...`,
+              );
+            }
+            // On Windows, npm is a "npm.cmd" shim, and Node cannot spawn
+            // .cmd/.bat files directly without shell:true (it throws
+            // EINVAL). packageName and targetVersion are both validated /
+            // registry-sourced by this point, so there's no unescaped
+            // user input reaching the shell here.
+            const isWindows = process.platform === "win32";
+            execFileSync(
+              isWindows ? "npm.cmd" : "npm",
+              ["install", `${resolved.packageName}@${resolved.targetVersion}`],
+              { stdio: effectiveJson ? "ignore" : "inherit", shell: isWindows },
             );
-            execSync(
-              `npm install ${resolved.packageName}@${resolved.targetVersion}`,
-              { stdio: "inherit" },
-            );
-          } else {
+          } else if (!effectiveJson) {
             console.log(
               "Skipping auto-install — risk is too high. Review files first.",
             );
@@ -129,7 +204,13 @@ program
       } catch (error: unknown) {
         const message =
           error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(message));
+
+        if (effectiveJson) {
+          console.log(JSON.stringify({ error: message }, null, 2));
+        } else {
+          console.error(chalk.red(message));
+        }
+
         process.exit(3);
       }
     },

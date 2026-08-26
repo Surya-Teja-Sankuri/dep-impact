@@ -28,7 +28,21 @@ const CHANGED_SIGNALS = [
   "deprecated",
 ];
 
-const METHOD_LIKE_PATTERN = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|[a-z][A-Za-z0-9_$]+/g;
+const METHOD_LIKE_PATTERN = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|[A-Za-z_$][\w$]{2,}/g;
+
+// Common English words (and the signal phrases themselves) that would
+// otherwise be picked up as the "nearest identifier" to a breaking-change
+// signal word, e.g. "CancelToken is removed" should extract "CancelToken",
+// not "is".
+const IDENTIFIER_STOPWORDS = new Set([
+  "the", "was", "has", "have", "been", "not", "for", "and", "with", "from",
+  "that", "this", "are", "but", "all", "can", "now", "also", "you", "your",
+  "when", "will", "must", "should", "please", "issue", "issues", "hit",
+  "problem", "problems", "method", "function", "option", "options", "api",
+  "removed", "renamed", "updated", "modified", "returns", "signature",
+  "deprecated", "changed", "breaking", "change", "longer", "add", "added",
+  "favor", "instead", "support", "supported", "use", "using", "new", "old",
+]);
 
 /**
  * Parses package upgrade impact by preferring declaration-file diffs and
@@ -155,7 +169,9 @@ function getSeverityForLine(
 }
 
 function extractNearestIdentifier(line: string): string | null {
-  const matches = Array.from(line.matchAll(METHOD_LIKE_PATTERN));
+  const matches = Array.from(line.matchAll(METHOD_LIKE_PATTERN)).filter(
+    (match) => !isIdentifierStopword(match[0]),
+  );
   if (matches.length === 0) {
     return null;
   }
@@ -179,6 +195,10 @@ function extractNearestIdentifier(line: string): string | null {
   }
 
   return nearestIdentifier;
+}
+
+function isIdentifierStopword(token: string): boolean {
+  return !token.includes(".") && IDENTIFIER_STOPWORDS.has(token.toLowerCase());
 }
 
 function findSignalIndex(lowerLine: string): number {

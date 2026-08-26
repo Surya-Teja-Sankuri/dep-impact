@@ -7,11 +7,15 @@
     "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
-    "declaration": true,
+    "declaration": false,
     "skipLibCheck": true
   },
   "include": [
     "src"
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/test-manual*.ts"
   ],
   "ts-node": {
     "esm": true
