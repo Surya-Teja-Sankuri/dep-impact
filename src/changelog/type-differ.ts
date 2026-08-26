@@ -89,6 +89,7 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
 
     const bareReExportNames = collectBareReExportNames(sourceFile);
     const exportAssignmentTarget = findExportAssignmentTarget(sourceFile);
+    const namedDeclLookup = buildNamedDeclLookup(sourceFile.statements);
 
     for (const statement of sourceFile.statements) {
       if (
@@ -139,6 +140,11 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
             .map((member) => stringifyNode(member, sourceFile))
             .join("; "),
         });
+        // Also decompose members (including inherited ones) into dotted
+        // names, e.g. "AxiosStatic.create" — many real .d.ts files model
+        // an entire callable/property surface as one interface, and a
+        // whole-interface signature blob is too coarse to usefully diff.
+        addInterfaceMembers(exportName, statement.name.text, namedDeclLookup, sourceFile, exportsMap);
         continue;
       }
 
@@ -180,9 +186,190 @@ async function extractExports(dtsFiles: string[]): Promise<Map<string, ExportedM
     if (exportAssignmentTarget) {
       addExportAssignmentTarget(exportAssignmentTarget, sourceFile, exportsMap);
     }
+
+    // Common pattern: `declare const axios: AxiosStatic; export default axios;`
+    // The default export's real shape is the referenced interface/class, so
+    // flatten its members onto plain top-level names — matching how usage
+    // like `axios.create()` is recorded (as "axios.create", not
+    // "axios.AxiosStatic.create") lets the scorer actually connect the two.
+    const defaultExportTarget = findDefaultExportTarget(sourceFile);
+    if (defaultExportTarget) {
+      const typeName = findDeclaredConstTypeName(defaultExportTarget, sourceFile);
+      if (typeName) {
+        const members = collectInterfaceMembers(typeName, namedDeclLookup, sourceFile, new Set());
+        for (const [name, member] of members) {
+          exportsMap.set(name, member);
+        }
+      }
+    }
   }
 
   return exportsMap;
+}
+
+function buildNamedDeclLookup(
+  statements: readonly ts.Statement[],
+): Map<string, ts.InterfaceDeclaration | ts.ClassDeclaration> {
+  const lookup = new Map<string, ts.InterfaceDeclaration | ts.ClassDeclaration>();
+
+  for (const statement of statements) {
+    if (ts.isInterfaceDeclaration(statement)) {
+      lookup.set(statement.name.text, statement);
+    } else if (ts.isClassDeclaration(statement) && statement.name) {
+      lookup.set(statement.name.text, statement);
+    }
+  }
+
+  return lookup;
+}
+
+function getHeritageTypeNames(node: ts.InterfaceDeclaration | ts.ClassDeclaration): string[] {
+  const names: string[] = [];
+
+  for (const clause of node.heritageClauses ?? []) {
+    for (const type of clause.types) {
+      if (ts.isIdentifier(type.expression)) {
+        names.push(type.expression.text);
+      }
+    }
+  }
+
+  return names;
+}
+
+/**
+ * Collects the named members of an interface or class, including those
+ * inherited via `extends` (a child's own member overrides an inherited one
+ * of the same name). Only named property/method members are collected —
+ * bare call signatures and index signatures have no name to key on.
+ */
+function collectInterfaceMembers(
+  typeName: string,
+  lookup: Map<string, ts.InterfaceDeclaration | ts.ClassDeclaration>,
+  sourceFile: ts.SourceFile,
+  visited: Set<string>,
+): Map<string, ExportedMember> {
+  const members = new Map<string, ExportedMember>();
+
+  if (visited.has(typeName)) {
+    return members;
+  }
+  visited.add(typeName);
+
+  const decl = lookup.get(typeName);
+  if (!decl) {
+    return members;
+  }
+
+  for (const parentName of getHeritageTypeNames(decl)) {
+    const parentMembers = collectInterfaceMembers(parentName, lookup, sourceFile, visited);
+    for (const [name, member] of parentMembers) {
+      members.set(name, member);
+    }
+  }
+
+  if (ts.isInterfaceDeclaration(decl)) {
+    for (const member of decl.members) {
+      if (!member.name || !ts.isIdentifier(member.name)) {
+        continue;
+      }
+
+      if (ts.isMethodSignature(member)) {
+        members.set(member.name.text, {
+          name: member.name.text,
+          kind: "method",
+          signature: getCallableSignature(member, sourceFile),
+          parameters: member.parameters.map(getParameterName),
+        });
+      } else if (ts.isPropertySignature(member)) {
+        members.set(member.name.text, {
+          name: member.name.text,
+          kind: "variable",
+          signature: member.type ? stringifyNode(member.type, sourceFile) : "unknown",
+        });
+      }
+    }
+  } else {
+    for (const member of decl.members) {
+      if (
+        !ts.isMethodDeclaration(member) ||
+        !member.name ||
+        !ts.isIdentifier(member.name) ||
+        hasPrivateLikeModifier(member)
+      ) {
+        continue;
+      }
+
+      members.set(member.name.text, {
+        name: member.name.text,
+        kind: "method",
+        signature: getCallableSignature(member, sourceFile),
+        parameters: member.parameters.map(getParameterName),
+      });
+    }
+  }
+
+  return members;
+}
+
+function addInterfaceMembers(
+  qualifiedPrefix: string,
+  typeName: string,
+  lookup: Map<string, ts.InterfaceDeclaration | ts.ClassDeclaration>,
+  sourceFile: ts.SourceFile,
+  exportsMap: Map<string, ExportedMember>,
+): void {
+  const members = collectInterfaceMembers(typeName, lookup, sourceFile, new Set());
+
+  for (const [name, member] of members) {
+    const qualifiedName = `${qualifiedPrefix}.${name}`;
+    exportsMap.set(qualifiedName, { ...member, name: qualifiedName });
+  }
+}
+
+/**
+ * Finds `export default X;` (as opposed to `export = X;`) and returns the
+ * identifier text of X, or null if there's no default export or it isn't a
+ * plain identifier.
+ */
+function findDefaultExportTarget(sourceFile: ts.SourceFile): string | null {
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isExportAssignment(statement) &&
+      !statement.isExportEquals &&
+      ts.isIdentifier(statement.expression)
+    ) {
+      return statement.expression.text;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Finds `declare const <name>: <TypeName>;` and returns TypeName, or null if
+ * no such declaration exists or its type isn't a plain type reference.
+ */
+function findDeclaredConstTypeName(name: string, sourceFile: ts.SourceFile): string | null {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) {
+      continue;
+    }
+
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === name &&
+        declaration.type &&
+        ts.isTypeReferenceNode(declaration.type) &&
+        ts.isIdentifier(declaration.type.typeName)
+      ) {
+        return declaration.type.typeName.text;
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -453,7 +640,7 @@ function hasPrivateLikeModifier(node: ts.Node): boolean {
 }
 
 function getCallableSignature(
-  node: ts.FunctionDeclaration | ts.MethodDeclaration,
+  node: ts.FunctionDeclaration | ts.MethodDeclaration | ts.MethodSignature,
   sourceFile: ts.SourceFile,
 ): string {
   const parameterText = node.parameters

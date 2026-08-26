@@ -1,6 +1,6 @@
 {
   "name": "dep-impact",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Analyze the impact of dependency updates in your Node.js project",
   "license": "MIT",
   "type": "module",
@@ -35,14 +35,14 @@
     "dotenv": "^17.4.2",
     "glob": "^10.5.0",
     "semver": "^7.7.4",
-    "tar": "^7.5.22"
+    "tar": "^7.5.22",
+    "typescript": "^5.9.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/semver": "^7.7.1",
     "@types/tar": "^6.1.13",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
   "files": [

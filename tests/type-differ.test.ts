@@ -293,6 +293,84 @@ describe("diffTypeDefinitions - inline export modifier alongside new patterns (n
   });
 });
 
+describe("diffTypeDefinitions - interface member decomposition (bug fix)", () => {
+  it("decomposes an exported interface's members into dotted names, including members inherited via extends", async () => {
+    const oldFile = writeFile(
+      "old.d.ts",
+      [
+        `export interface Base {`,
+        `  get(url: string): void;`,
+        `}`,
+        `export interface Api extends Base {`,
+        `  create(config?: string): void;`,
+        `}`,
+      ].join("\n"),
+    );
+    const newFile = writeFile(
+      "new.d.ts",
+      [
+        `export interface Base {`,
+        `  get(url: string): void;`,
+        `}`,
+        `export interface Api extends Base {`,
+        `  create(config?: string, extra?: number): void;`,
+        `}`,
+      ].join("\n"),
+    );
+
+    const result = await diffTypeDefinitions([oldFile], [newFile], "pkg");
+
+    // "Api.create" (own member) changed; "Api.get" (inherited from Base) did not.
+    const createChange = result.breakingChanges.find((c) => c.identifier === "Api.create");
+    expect(createChange).toBeDefined();
+    expect(createChange?.severity).toBe("changed");
+    expect(result.breakingChanges.some((c) => c.identifier === "Api.get")).toBe(false);
+  });
+
+  it("flattens the common 'declare const x: Shape; export default x;' pattern onto plain package-qualified names", async () => {
+    // This mirrors axios's actual .d.ts shape: a big interface describing the
+    // default export's callable surface, referenced only through a `declare
+    // const` + `export default`. Real usage like `pkg.create()` is recorded
+    // by the scanner as "pkg.create" (package-qualified, no interface name in
+    // the path) — so the differ must expose the SAME plain name, or a real
+    // detected change can never match real usage.
+    const oldFile = writeFile(
+      "old.d.ts",
+      [
+        `export interface PkgInstance {`,
+        `  get(url: string): void;`,
+        `}`,
+        `export interface PkgStatic extends PkgInstance {`,
+        `  create(config?: string): PkgInstance;`,
+        `}`,
+        `declare const pkg: PkgStatic;`,
+        `export default pkg;`,
+      ].join("\n"),
+    );
+    const newFile = writeFile(
+      "new.d.ts",
+      [
+        `export interface PkgInstance {`,
+        `  get(url: string): void;`,
+        `}`,
+        `export interface PkgStatic extends PkgInstance {`,
+        `  create(config?: string, extra: number): PkgInstance;`,
+        `}`,
+        `declare const pkg: PkgStatic;`,
+        `export default pkg;`,
+      ].join("\n"),
+    );
+
+    const result = await diffTypeDefinitions([oldFile], [newFile], "pkg");
+
+    // Plain, package-qualified identifier — not "PkgStatic.create".
+    const createChange = result.breakingChanges.find((c) => c.identifier === "pkg.create");
+    expect(createChange).toBeDefined();
+    expect(createChange?.severity).toBe("breaking"); // added a required parameter
+    expect(result.breakingChanges.some((c) => c.identifier === "pkg.get")).toBe(false);
+  });
+});
+
 describe("diffTypeDefinitions - multi-file input", () => {
   it("merges exports declared across multiple .d.ts files into a single map", async () => {
     const oldFileA = writeFile("old-a.d.ts", `export function foo(): void;\n`);
