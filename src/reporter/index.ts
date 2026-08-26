@@ -42,7 +42,10 @@ export function printReport(
       ...result,
       files: result.files.map((f) => ({
         ...f,
-        file: path.relative(process.cwd(), f.file),
+        // Always forward-slash, regardless of host OS — this is
+        // machine-readable output meant for CI, which is predominantly
+        // Linux, and JSON/config tooling conventionally uses posix paths.
+        file: path.relative(process.cwd(), f.file).split(path.sep).join("/"),
       })),
     };
     console.log(JSON.stringify(jsonResult, null, 2));
